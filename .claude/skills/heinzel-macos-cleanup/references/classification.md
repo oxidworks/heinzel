@@ -3,8 +3,8 @@
 `scan.py` compares every entry in the scanned locations with the
 installed apps. It collects the bundle ids of each app and of all
 nested bundles (helpers, extensions, XPC services in frameworks),
-the Team ID from `codesign`, Homebrew packages and the commands
-on `PATH`.
+the Team ID and the app groups from `codesign`, Homebrew packages
+and the commands on `PATH`.
 
 ## Classes
 
@@ -59,6 +59,13 @@ Each trap came up on a real machine.
   `85C27NK92C.com.flexibits.fantastical2.mac` belongs to
   `com.flexibits.fantastical2.mac`. Some put `group.` first:
   `group.245B4P8J7P.com.staysorted.Sorted.3`.
+- **Group containers are named after app groups.** Office uses
+  `UBF8T346G9.Office` and `UBF8T346G9.ms`, Wipr uses
+  `group.wipr2.rules`. None of them is a bundle id. The scanner
+  reads `com.apple.security.application-groups` from the
+  entitlements of each app. A listed group is `installed`. Only
+  the app itself is read, not its nested bundles. The uninstall
+  mode skips a group another installed app declares.
 - **The same vendor is not the same app.** Pastebot 3
   (`com.tapbots.Pastebot3Mac`) is installed. The containers of
   Ivory and of Pastebot 2 are still leftovers. The scanner

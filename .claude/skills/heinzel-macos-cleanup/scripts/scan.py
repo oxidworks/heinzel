@@ -74,6 +74,7 @@ APP_DIRS = [
 ]
 
 CONTAINER_METADATA = ".com.apple.containermanagerd.metadata.plist"
+APP_GROUPS = "com.apple.security.application-groups"
 
 # Bundle folders not worth descending into for nested bundle ids.
 SKIP_DIRS = {"Developer", "Headers", "Modules", "_CodeSignature"}
@@ -202,6 +203,10 @@ class Inventory:
         return prefixes - GENERIC_VENDORS
 
     @cached_property
+    def app_groups(self) -> set[str]:
+        return {g for a in self.apps for g in a["groups"]}
+
+    @cached_property
     def first_words(self) -> set[str]:
         return {w for w in map(first_word, self.app_names) if w}
 
@@ -267,6 +272,8 @@ def classify_name(name: str, inv: Inventory) -> tuple[str, str]:
     reason = apple_reason(low, bid, inv.apple_daemons)
     if reason:
         return "apple", reason
+    if low in inv.app_groups:
+        return "installed", "app group of an installed app"
     if "playwright" in low or low in CACHE_NAMES:
         return "cache", "developer tool cache"
 
@@ -301,13 +308,19 @@ def classify_name(name: str, inv: Inventory) -> tuple[str, str]:
     return "unclear", "name matches no installed app"
 
 
+def parse_plist(data: bytes) -> dict:
+    try:
+        plist = plistlib.loads(data)
+    except (plistlib.InvalidFileException, ValueError):
+        return {}
+    return plist if isinstance(plist, dict) else {}
+
+
 def read_plist(path: Path) -> dict:
     try:
-        with open(path, "rb") as f:
-            data = plistlib.load(f)
-    except (OSError, plistlib.InvalidFileException, ValueError):
+        return parse_plist(path.read_bytes())
+    except OSError:
         return {}
-    return data if isinstance(data, dict) else {}
 
 
 def launchd_program(path: Path) -> str:
@@ -370,14 +383,16 @@ def app_matches(
     app_ids: set[str],
     app_names: set[str],
     taken: set[str] = frozenset(),
+    shared: set[str] = frozenset(),
 ) -> str:
     """Return "exact", "name" or "" for an entry and one app.
 
-    `taken` holds first words of other apps' names.
+    `taken` holds first words of other apps' names, `shared` their
+    app groups.
     """
     low = strip_suffix(path.name).lower()
     _, bid = split_id(path.name)
-    if apple_reason(low, bid):
+    if apple_reason(low, bid) or low in shared:
         return ""
     if owned_by(bid, app_ids):
         return "exact"
@@ -433,9 +448,20 @@ def bundle_infos(root: Path):
             yield Path(dirpath), read_plist(Path(dirpath) / "Info.plist")
 
 
-def team_id(path: Path) -> str:
-    m = re.search(r"TeamIdentifier=([A-Z0-9]{10})", run(["codesign", "-dv", str(path)]))
-    return m.group(1) if m else ""
+def signature(path: Path) -> tuple[str, set[str]]:
+    """Return the Team ID and the lowercase app groups of a signed bundle."""
+    # -v writes the Team ID to stderr, --entitlements the plist to stdout.
+    r = proc(["codesign", "-dv", "--entitlements", "-", "--xml", str(path)])
+    if r and r.returncode:
+        # An older codesign without --xml refuses the whole call.
+        r = proc(["codesign", "-dv", str(path)])
+    if not r:
+        return "", set()
+    m = re.search(r"TeamIdentifier=([A-Z0-9]{10})", r.stderr)
+    groups = parse_plist(r.stdout.encode()).get(APP_GROUPS)
+    if not isinstance(groups, list):
+        groups = []
+    return m.group(1) if m else "", {g.lower() for g in groups if isinstance(g, str)}
 
 
 def bundle_names(info: dict) -> set[str]:
@@ -455,12 +481,14 @@ def describe_app(root: Path) -> dict:
             top = info
         else:
             nested |= bundle_names(info)
+    team, groups = signature(root)
     return {
         "path": str(root),
         "ids": ids,
         "names": {root.stem.lower()} | bundle_names(top),
         "nested_names": nested,
-        "team": team_id(root),
+        "team": team,
+        "groups": groups,
     }
 
 
@@ -573,14 +601,16 @@ def scan_app(inv: Inventory, query: str) -> dict:
         }
     target = targets[0]
     app_path, ids, names = target["path"], target["ids"], target["names"]
-    taken = {first_word(n) for a in inv.apps if a is not target for n in a["names"]}
+    others = [a for a in inv.apps if a is not target]
+    taken = {first_word(n) for a in others for n in a["names"]}
+    shared = {g for a in others for g in a["groups"]}
 
     unreadable: list[str] = []
     found = [{"path": app_path, "match": "exact"}]
     for path in entries(unreadable):
         if str(path) == app_path:
             continue
-        m = app_matches(path, ids, names, taken)
+        m = app_matches(path, ids, names, taken, shared=shared)
         program = launchd_program(path) if is_launchd_plist(path) else ""
         if not m and program.startswith(app_path + "/"):
             m = "exact"

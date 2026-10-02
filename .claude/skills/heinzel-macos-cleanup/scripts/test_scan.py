@@ -41,6 +41,10 @@ INV = scan.Inventory(
     team_ids={"9JTH7AWHE6", "UBF8T346G9"},
     tools={"ngrok", "mix"},
     apple_daemons={"tipsd", "homeenergyd"},
+    apps=[
+        {"id": "com.microsoft.word", "groups": {"ubf8t346g9.ms"}},
+        {"id": "com.wipr.mac", "groups": {"group.wipr2.rules"}},
+    ],
 )
 
 
@@ -88,6 +92,11 @@ class ClassifyName(unittest.TestCase):
     def test_team_prefix_of_installed_team_without_bundle_id_is_vendor(self):
         self.assertEqual(cls("UBF8T346G9.Office"), "vendor")
         self.assertEqual(cls("UBF8T346G9.OfficeWordWidget"), "vendor")
+
+    def test_app_group_of_installed_app_is_installed(self):
+        # Office declares UBF8T346G9.ms in its application-groups entitlement.
+        self.assertEqual(cls("UBF8T346G9.ms"), "installed")
+        self.assertEqual(cls("group.wipr2.rules"), "installed")
 
     def test_team_prefix_of_unknown_team_is_orphan(self):
         self.assertEqual(cls("85C27NK92C.com.flexibits.fantastical2.mac"), "orphan")
@@ -288,9 +297,46 @@ class DescribeApp(TempDir):
         self.assertEqual(desc["ids"], {"com.microsoft.teams2", "x.k"})
         self.assertEqual(desc["nested_names"], {"knowledge"})
 
+    def test_team_and_app_groups_come_from_one_codesign_call(self):
+        bundle = self.root / "Microsoft Word.app"
+        make_bundle(bundle, CFBundleIdentifier="com.microsoft.word")
+        groups = ["UBF8T346G9.Office", "UBF8T346G9.ms"]
+        ent = {"com.apple.security.application-groups": groups}
+        signed = subprocess.CompletedProcess(
+            [], 0, plistlib.dumps(ent).decode(), "TeamIdentifier=UBF8T346G9\n"
+        )
+        with mock.patch.object(scan, "proc", return_value=signed) as codesign:
+            desc = scan.describe_app(bundle)
+        codesign.assert_called_once()
+        self.assertEqual(desc["team"], "UBF8T346G9")
+        self.assertEqual(desc["groups"], {"ubf8t346g9.office", "ubf8t346g9.ms"})
 
-def app_entry(path, bid):
-    return {"path": path, "ids": {bid}, "names": {Path(path).stem.lower()}}
+    def test_unsigned_app_has_no_team_and_no_groups(self):
+        bundle = self.root / "Plain.app"
+        make_bundle(bundle, CFBundleIdentifier="com.plain")
+        unsigned = subprocess.CompletedProcess([], 1, "", "code object is not signed")
+        with mock.patch.object(scan, "proc", return_value=unsigned):
+            desc = scan.describe_app(bundle)
+        self.assertEqual((desc["team"], desc["groups"]), ("", set()))
+
+    def test_team_survives_a_codesign_without_xml(self):
+        # An older codesign that rejects --xml still has to yield the Team ID.
+        bundle = self.root / "Old.app"
+        make_bundle(bundle, CFBundleIdentifier="com.old")
+        refused = subprocess.CompletedProcess([], 1, "", "unrecognized option `--xml'")
+        signed = subprocess.CompletedProcess([], 0, "", "TeamIdentifier=UBF8T346G9\n")
+        with mock.patch.object(scan, "proc", side_effect=[refused, signed]):
+            desc = scan.describe_app(bundle)
+        self.assertEqual((desc["team"], desc["groups"]), ("UBF8T346G9", set()))
+
+
+def app_entry(path, bid, groups=()):
+    return {
+        "path": path,
+        "ids": {bid},
+        "names": {Path(path).stem.lower()},
+        "groups": set(groups),
+    }
 
 
 class ScanApp(TempDir):
@@ -317,6 +363,24 @@ class ScanApp(TempDir):
     def test_bundle_id_selects_one_app(self):
         result = self.scan_app("org.mozilla.firefox")
         self.assertEqual(result["apps"], ["/Applications/Firefox.app"])
+
+    def scan_entries(self, inv, query, *names):
+        loc = self.root / "Library"
+        for n in names:
+            (loc / n).mkdir(parents=True)
+        with no_probes(locations=[loc]):
+            result = scan.scan_app(inv, query)
+        return [Path(e["path"]).name for e in result["entries"]]
+
+    def test_app_group_shared_with_other_app_is_not_listed(self):
+        group = "group.com.vendor.app"
+        inv = scan.Inventory(
+            apps=[
+                app_entry("/Applications/A.app", "com.vendor.app", groups=[group]),
+                app_entry("/Applications/B.app", "com.vendor.appb", groups=[group]),
+            ]
+        )
+        self.assertEqual(self.scan_entries(inv, "A", group), ["A.app"])
 
     def test_app_inside_a_scanned_folder_is_listed_once(self):
         loc = self.root / "Application Support"
