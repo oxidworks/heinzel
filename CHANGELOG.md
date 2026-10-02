@@ -1,5 +1,18 @@
 # Changelog
 
+## 2.24.0 — 2026-10-02
+
+- **The guard stops redirects onto computed
+  targets.** An arrow in the echo text of a nested
+  remote check is a redirect, and one truncated
+  `/usr/bin/nvim` as root because the next word was
+  a `readlink` lookup. The guard now denies a
+  redirect onto a command substitution and an arrow
+  onto any expansion. The rules add that empty
+  output from a check is a finding and that
+  read-only checks run without root. Reported by
+  Benjamin Bock (#51).
+
 ## 2.23.0 — 2026-10-01
 
 - **New skill: macOS cleanup.** It finds leftovers
