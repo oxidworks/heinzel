@@ -25,9 +25,9 @@ and the commands on `PATH`.
 `orphans` hides `apple` and `installed`. Pass `--all` to see them.
 
 In the uninstall mode each entry carries `match`: `exact` for the
-app's bundle ids, `name` for folders named after the app. Propose
-`exact` entries as a group. List `name` entries separately and
-confirm each.
+app's bundle ids, `name` for folders named after the app or its
+vendor. Propose `exact` entries as a group. List `name` entries
+separately and confirm each.
 
 ## Verify before proposing
 
@@ -84,7 +84,14 @@ Each trap came up on a real machine.
 - **Vendor folders use the company name.** Firefox keeps data in
   `Mozilla` and `Firefox`. Brave keeps its profiles in
   `BraveSoftware`. ChatGPT uses `OpenAI`. These hold profiles
-  with passwords and bookmarks.
+  with passwords and bookmarks. A folder named like the second
+  label of an app's own bundle id is `vendor`: `Mozilla` matches
+  `org.mozilla.firefox`. The whole name must match. Nested
+  frameworks do not count: Firebase brings `com.google.*` ids,
+  but `Google` holds Chrome's profiles.
+- **A vendor folder can serve several apps.** The firefoxpwa
+  runtime nests `org.mozilla.*` helpers. The uninstall mode skips
+  a vendor folder that any id of another installed app names.
 - **Apple data often has no Apple prefix.** `coreMLCache` can
   hold several GB. `GeoServices`, `CloudDocs` and `CallHistoryDB`
   are Apple data too. So are daemon folders like `tipsd`, and

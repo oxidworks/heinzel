@@ -153,12 +153,6 @@ APPLE_NAME_PREFIXES = ("siri",)
 # Bundle id prefixes shared by unrelated apps.
 GENERIC_VENDORS = {"com.electron", "com.github", "io.github"}
 
-# Vendor folders named after the company, not the app.
-VENDOR_ALIASES = {
-    "mozilla": {"firefox", "thunderbird"},
-    "openai": {"chatgpt", "codex"},
-}
-
 # Caches of developer tools. Safe to delete, rebuilt on demand.
 CACHE_NAMES = {
     "bun",
@@ -203,6 +197,11 @@ class Inventory:
         return prefixes - GENERIC_VENDORS
 
     @cached_property
+    def vendor_labels(self) -> set[str]:
+        # Only the app's own id. Nested frameworks carry other vendors.
+        return {vendor_label(a["id"]) for a in self.apps} - {""}
+
+    @cached_property
     def app_groups(self) -> set[str]:
         return {g for a in self.apps for g in a["groups"]}
 
@@ -223,6 +222,20 @@ def first_word(name: str) -> str:
     parts = name.split()
     word = squash(parts[0]) if parts else ""
     return word if len(word) >= 4 else ""
+
+
+def vendor_label(bid: str) -> str:
+    """Return the squashed vendor of a bundle id: org.mozilla.firefox → mozilla.
+
+    Vendor folders like Mozilla or OpenAI carry this name.
+    """
+    parts = bid.split(".")
+    if len(parts) < 3 or bid.startswith(APPLE_PREFIXES):
+        return ""
+    if ".".join(parts[:2]) in GENERIC_VENDORS:
+        return ""
+    label = squash(parts[1])
+    return label if len(label) >= 4 else ""
 
 
 def strip_suffix(name: str) -> str:
@@ -299,9 +312,8 @@ def classify_name(name: str, inv: Inventory) -> tuple[str, str]:
             len(norm) >= 5 and len(sn) >= 5 and (sn in norm or norm in sn)
         ):
             return "installed", f"matches app name {n!r}"
-    apps = VENDOR_ALIASES.get(low, set()) & inv.app_names
-    if apps:
-        return "vendor", f"vendor folder of {', '.join(sorted(apps))}"
+    if norm in inv.vendor_labels:
+        return "vendor", f"vendor {norm!r} has an app installed"
     for w in inv.first_words:
         if w in norm:
             return "vendor", f"shares the word {w!r} with an installed app"
@@ -383,12 +395,13 @@ def app_matches(
     app_ids: set[str],
     app_names: set[str],
     taken: set[str] = frozenset(),
+    label: str = "",
     shared: set[str] = frozenset(),
 ) -> str:
     """Return "exact", "name" or "" for an entry and one app.
 
-    `taken` holds first words of other apps' names, `shared` their
-    app groups.
+    `label` is the app's vendor label. `taken` holds first words and
+    vendor labels of other apps, `shared` their app groups.
     """
     low = strip_suffix(path.name).lower()
     _, bid = split_id(path.name)
@@ -397,7 +410,7 @@ def app_matches(
     if owned_by(bid, app_ids):
         return "exact"
     norm = squash(low)
-    if VENDOR_ALIASES.get(norm, set()) & app_names:
+    if label and norm == label and norm not in taken:
         return "name"
     for n in app_names:
         if squash(n) == norm:
@@ -482,8 +495,10 @@ def describe_app(root: Path) -> dict:
         else:
             nested |= bundle_names(info)
     team, groups = signature(root)
+    main = top.get("CFBundleIdentifier")
     return {
         "path": str(root),
+        "id": main.lower() if isinstance(main, str) else "",
         "ids": ids,
         "names": {root.stem.lower()} | bundle_names(top),
         "nested_names": nested,
@@ -603,14 +618,16 @@ def scan_app(inv: Inventory, query: str) -> dict:
     app_path, ids, names = target["path"], target["ids"], target["names"]
     others = [a for a in inv.apps if a is not target]
     taken = {first_word(n) for a in others for n in a["names"]}
+    taken |= {vendor_label(b) for a in others for b in a["ids"]}
     shared = {g for a in others for g in a["groups"]}
+    label = vendor_label(target["id"])
 
     unreadable: list[str] = []
     found = [{"path": app_path, "match": "exact"}]
     for path in entries(unreadable):
         if str(path) == app_path:
             continue
-        m = app_matches(path, ids, names, taken, shared=shared)
+        m = app_matches(path, ids, names, taken, label, shared)
         program = launchd_program(path) if is_launchd_plist(path) else ""
         if not m and program.startswith(app_path + "/"):
             m = "exact"

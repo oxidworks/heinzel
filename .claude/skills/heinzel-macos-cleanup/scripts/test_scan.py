@@ -21,6 +21,10 @@ INV = scan.Inventory(
         "com.brave.browser",
         "com.electron.dockerdesktop",
         "io.github.someone.tool",
+        "com.openai.chat",
+        "org.swift.swiftpm",
+        "com.apple.safari",
+        "com.google.firebase.messaging",
     },
     names={
         "pastebot",
@@ -41,7 +45,12 @@ INV = scan.Inventory(
     team_ids={"9JTH7AWHE6", "UBF8T346G9"},
     tools={"ngrok", "mix"},
     apple_daemons={"tipsd", "homeenergyd"},
+    # Only an app's own id names a vendor folder. Firebase is nested.
     apps=[
+        {"id": "com.openai.chat", "groups": set()},
+        {"id": "org.swift.swiftpm", "groups": set()},
+        {"id": "com.apple.safari", "groups": set()},
+        {"id": "com.electron.dockerdesktop", "groups": set()},
         {"id": "com.microsoft.word", "groups": {"ubf8t346g9.ms"}},
         {"id": "com.wipr.mac", "groups": {"group.wipr2.rules"}},
     ],
@@ -137,9 +146,19 @@ class ClassifyName(unittest.TestCase):
         self.assertEqual(cls("BraveSoftware"), "vendor")
         self.assertEqual(cls("Microsoft Edge Beta"), "vendor")
 
-    def test_vendor_folder_alias(self):
-        # Firefox keeps its profile in Mozilla.
-        self.assertEqual(cls("Mozilla"), "vendor")
+    def test_folder_named_after_bundle_id_vendor_is_vendor(self):
+        # ChatGPT (com.openai.chat) keeps its data in OpenAI.
+        self.assertEqual(cls("OpenAI"), "vendor")
+
+    def test_bundle_id_vendor_must_match_the_whole_name(self):
+        self.assertEqual(cls("swift-test"), "unclear")
+
+    def test_generic_and_apple_vendors_name_no_folder(self):
+        self.assertEqual(cls("Electron"), "unclear")
+        self.assertEqual(cls("Apple"), "unclear")
+
+    def test_vendor_of_nested_framework_names_no_folder(self):
+        self.assertEqual(cls("Google"), "unclear")
 
     def test_apple_daemon_style_names(self):
         for n in ("homeenergyd", "tipsd", "SiriTTSService", "SiriEntityCache"):
@@ -294,6 +313,7 @@ class DescribeApp(TempDir):
         )
         desc = scan.describe_app(bundle)
         self.assertEqual(desc["names"], {"microsoft teams"})
+        self.assertEqual(desc["id"], "com.microsoft.teams2")
         self.assertEqual(desc["ids"], {"com.microsoft.teams2", "x.k"})
         self.assertEqual(desc["nested_names"], {"knowledge"})
 
@@ -330,10 +350,11 @@ class DescribeApp(TempDir):
         self.assertEqual((desc["team"], desc["groups"]), ("UBF8T346G9", set()))
 
 
-def app_entry(path, bid, groups=()):
+def app_entry(path, bid, nested=(), groups=()):
     return {
         "path": path,
-        "ids": {bid},
+        "id": bid,
+        "ids": {bid, *nested},
         "names": {Path(path).stem.lower()},
         "groups": set(groups),
     }
@@ -372,6 +393,16 @@ class ScanApp(TempDir):
             result = scan.scan_app(inv, query)
         return [Path(e["path"]).name for e in result["entries"]]
 
+    def test_vendor_folder_of_two_installed_apps_is_not_listed(self):
+        # Thunderbird still uses Mozilla when Firefox goes.
+        inv = scan.Inventory(
+            apps=[
+                app_entry("/Applications/Firefox.app", "org.mozilla.firefox"),
+                app_entry("/Applications/Thunderbird.app", "org.mozilla.thunderbird"),
+            ]
+        )
+        self.assertEqual(self.scan_entries(inv, "Firefox", "Mozilla"), ["Firefox.app"])
+
     def test_app_group_shared_with_other_app_is_not_listed(self):
         group = "group.com.vendor.app"
         inv = scan.Inventory(
@@ -381,6 +412,22 @@ class ScanApp(TempDir):
             ]
         )
         self.assertEqual(self.scan_entries(inv, "A", group), ["A.app"])
+
+    def test_vendor_of_other_apps_nested_bundle_is_not_listed(self):
+        # The firefoxpwa runtime nests org.mozilla helpers under its own id.
+        inv = scan.Inventory(
+            apps=[
+                app_entry("/Applications/Firefox.app", "org.mozilla.firefox"),
+                app_entry("/x/Runtime.app", "pwa.rt", ["org.mozilla.gpu-helper"]),
+            ]
+        )
+        self.assertEqual(self.scan_entries(inv, "Firefox", "Mozilla"), ["Firefox.app"])
+
+    def test_vendor_of_nested_framework_is_not_listed(self):
+        inv = scan.Inventory(
+            apps=[app_entry("/Applications/Foo.app", "com.foo.app", ["com.google.fb"])]
+        )
+        self.assertEqual(self.scan_entries(inv, "Foo", "Google"), ["Foo.app"])
 
     def test_app_inside_a_scanned_folder_is_listed_once(self):
         loc = self.root / "Application Support"
@@ -432,8 +479,10 @@ class AppMatches(unittest.TestCase):
     BRAVE_IDS = frozenset({"com.brave.browser", "com.brave.browser.helper"})
     BRAVE_NAMES = frozenset({"brave browser"})
 
-    def match(self, name, ids=BRAVE_IDS, names=BRAVE_NAMES, taken=frozenset()):
-        return scan.app_matches(Path("/x") / name, set(ids), set(names), taken)
+    def match(
+        self, name, ids=BRAVE_IDS, names=BRAVE_NAMES, taken=frozenset(), label="brave"
+    ):
+        return scan.app_matches(Path("/x") / name, set(ids), set(names), taken, label)
 
     def test_bundle_id_forms_are_exact(self):
         for n in (
@@ -459,9 +508,17 @@ class AppMatches(unittest.TestCase):
             with self.subTest(n):
                 self.assertEqual(self.match(n, {"com.foo"}, {"knowledge"}), "")
 
-    def test_vendor_alias_folder_is_name_match(self):
-        m = self.match("Mozilla", {"org.mozilla.firefox"}, {"firefox"})
+    def test_bundle_id_vendor_folder_is_name_match(self):
+        m = self.match("Mozilla", {"org.mozilla.firefox"}, {"firefox"}, label="mozilla")
         self.assertEqual(m, "name")
+        m = self.match("Flexibits", {"com.flexibits.x"}, {"x"}, label="flexibits")
+        self.assertEqual(m, "name")
+
+    def test_bundle_id_vendor_shared_with_other_app_is_no_match(self):
+        m = self.match(
+            "Mozilla", {"org.mozilla.firefox"}, {"firefox"}, {"mozilla"}, "mozilla"
+        )
+        self.assertEqual(m, "")
 
     def test_first_word_shared_with_other_app_is_no_match(self):
         m = self.match(
