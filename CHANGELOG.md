@@ -1,5 +1,18 @@
 # Changelog
 
+## 2.25.0 — 2026-10-08
+
+- **macOS cleanup knows app groups and vendor
+  folders.** Group containers are named after app
+  groups, not bundle ids, so the scanner could list
+  the container of an installed app as an orphan.
+  It now reads the groups from each app's
+  entitlements. Vendor folders such as `Mozilla`
+  come from the installed bundle ids instead of a
+  fixed list, and uninstalling one app leaves a
+  group or vendor folder that another app still
+  uses. Contributed by Oliver Andrich (#53).
+
 ## 2.24.0 — 2026-10-02
 
 - **The guard stops redirects onto computed
